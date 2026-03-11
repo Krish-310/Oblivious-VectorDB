@@ -1,0 +1,19 @@
+# Compiled files
+*.o
+*.out
+hnsw_eval
+
+# OS generated files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+
+# Downloaded data
+data/
+venv/
