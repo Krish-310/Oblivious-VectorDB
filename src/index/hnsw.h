@@ -1,9 +1,11 @@
 #ifndef HNSW_H
 #define HNSW_H
 
+#include "../storage/storage_adapter.h"
 #include "distance.h"
 #include <queue>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace hnsw {
@@ -22,6 +24,12 @@ public:
 
   // Insert a new vector into the index
   void insert(int label, const float *vector);
+
+  // Serialize index to disk
+  void save_index(const std::string &filepath) const;
+
+  // Load index from disk
+  void load_index(const std::string &filepath);
 
   // Search for the k nearest neighbors to the query vector
   std::vector<int> search(const float *query, int k, int ef_search);
@@ -68,13 +76,11 @@ private:
   std::vector<unsigned int> visited_array_;
   unsigned int visited_tag_;
 
-  // Pointer to raw vectors (to prevent keeping copies everywhere)
-  // Assuming data will outlive HNSW class in this basic setup.
-  // In a production system, this would be managed tightly.
-  const float *data_ptr_ = nullptr;
+  // Pointer to the storage layer, which handles memory or disk vectors
+  storage::StorageAdapter *storage_ = nullptr;
 
 public:
-  void set_data(const float *data) { data_ptr_ = data; }
+  void set_storage(storage::StorageAdapter *storage) { storage_ = storage; }
 };
 
 } // namespace hnsw

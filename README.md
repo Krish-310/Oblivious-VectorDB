@@ -42,13 +42,19 @@ Execute the binary to run the evaluation. By default, it expects data to be loca
 You can optionally pass a different path to the data directory:
 
 ```bash
+```bash
 ./hnsw_eval ./data/glove-100-angular
+```
+
+To force a rebuild of the index (ignoring any saved `graph_edges.db`), use:
+```bash
+./hnsw_eval ./data/sift-128-euclidean --rebuild-index
 ```
 
 ## Structure
 
 * `src/main.cpp` - Entrypoint testing script
-* `src/hnsw.h/cpp` - Graph logic and HNSW node management
-* `src/distance.h` - Vectorized distance calculation metrics
-* `src/utils.h` - File IO and timing utilities
+* `src/index/` - Core Graph logic (`hnsw.h/.cpp`) and math metrics (`distance.h`)
+* `src/storage/` - VectorDB abstraction layer `MemoryStorage` and mmap `DiskStorage` with `LRUCache`.
+* `src/utils/` - Shared file I/O and timing utilities
 * `scripts/` - Python utilities for working with HDF5 benchmarks

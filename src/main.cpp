@@ -1,5 +1,7 @@
-#include "hnsw.h"
-#include "utils.h"
+#include "index/hnsw.h"
+#include "storage/disk_storage.h"
+#include "storage/memory_storage.h"
+#include "utils/utils.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -40,7 +42,8 @@ bool load_datasets(const std::string &data_path, Dataset &ds) {
   return true;
 }
 
-void build_index(hnsw::HNSW &index, const Dataset &ds) {
+void build_index(hnsw::HNSW &index, const Dataset &ds,
+                 const std::string &index_path) {
   std::cout << "========================================\n";
   std::cout << "[PHASE 1] Index Construction\n";
   std::cout << "========================================\n";
@@ -59,6 +62,10 @@ void build_index(hnsw::HNSW &index, const Dataset &ds) {
   std::cout << "  -> Build Time:        " << build_time << " seconds\n";
   std::cout << "  -> Insertion Speed:   " << (ds.base_n / build_time)
             << " items/sec\n\n";
+
+  std::cout << "  -> Saving index to " << index_path << "...\n";
+  index.save_index(index_path);
+  std::cout << "  -> Index saved successfully.\n\n";
 }
 
 void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
@@ -103,9 +110,17 @@ void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
 }
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0); // Disable stdout buffering
   std::string data_path = "./data/sift-128-euclidean";
-  if (argc > 1) {
-    data_path = argv[1];
+  bool rebuild_index = false;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--rebuild-index") {
+      rebuild_index = true;
+    } else {
+      data_path = arg;
+    }
   }
 
   std::cout << "\n========================================\n";
@@ -126,9 +141,38 @@ int main(int argc, char **argv) {
   std::cout << "  -> ef_construction:   " << ef_construction << "\n\n";
 
   hnsw::HNSW index(ds.base_dim, ds.base_n, M, ef_construction);
-  index.set_data(ds.base.data());
 
-  build_index(index, ds);
+  std::string index_path = data_path + "/graph_edges.db";
+  bool index_loaded = false;
+
+  if (!rebuild_index) {
+    try {
+      std::cout << "Attempting to load existing index from " << index_path
+                << "...\n";
+      index.load_index(index_path);
+      std::cout << "Successfully loaded existing index.\n\n";
+      index_loaded = true;
+    } catch (...) {
+      std::cout << "Index not found or invalid. Rebuilding from scratch...\n\n";
+    }
+  } else {
+    std::cout
+        << "Forced rebuild requested. Rebuilding index from scratch...\n\n";
+  }
+
+  if (!index_loaded) {
+    // Initialize Memory Storage just for building to make it as fast as
+    // possible
+    hnsw::storage::MemoryStorage mem_storage(ds.base.data(), ds.base_dim);
+    index.set_storage(&mem_storage);
+    build_index(index, ds, index_path);
+  }
+
+  // Initialize Disk Storage for searching to verify disk I/O implementation
+  // works
+  hnsw::storage::DiskStorage disk_storage(data_path + "/base.bin", ds.base_dim,
+                                          10000); // 10k itemsLRU cache
+  index.set_storage(&disk_storage);
 
   int k = 10;
   int ef_search = 50;

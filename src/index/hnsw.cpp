@@ -1,6 +1,9 @@
 #include "hnsw.h"
 #include "distance.h"
 #include <cmath>
+#include <fstream>
+#include <iostream>
+#include <stdexcept>
 
 namespace hnsw {
 
@@ -74,7 +77,7 @@ void HNSW::insert(int label, const float *vector) {
   }
 
   // Calculate distance to entrypoint to start the search
-  const float *ep_vector = data_ptr_ + (size_t)ep * dim_;
+  const float *ep_vector = storage_->get_vector(ep);
   float dist_ep = dist_func_(vector, ep_vector, dim_);
 
   for (int l_c = L; l_c > l; l_c--) {
@@ -95,12 +98,52 @@ void HNSW::insert(int label, const float *vector) {
       graph_[l_c][label].push_back(neighbor);
       graph_[l_c][neighbor].push_back(label);
 
-      // shrink connections if needed
+      // shrink connections if needed using a simple furthest-node heuristic
       if (graph_[l_c][neighbor].size() > (size_t)((l_c == 0) ? M0_ : M_)) {
-        // Very basic shrink: remove the last one just to keep limits (not
-        // strictly correct HNSW heuristic) A true HNSW shrink would do
-        // select_neighbours() on the neighbor's list again
-        graph_[l_c][neighbor].pop_back();
+        int max_M = (l_c == 0) ? M0_ : M_;
+        const float *n_vector = storage_->get_vector(neighbor);
+
+        // Find the furthest connection to remove
+        float max_dist = -1.0;
+        int furthest_idx = -1;
+
+        for (size_t i = 0; i < graph_[l_c][neighbor].size(); i++) {
+          int candidate = graph_[l_c][neighbor][i];
+          const float *c_vector = storage_->get_vector(candidate);
+          float d = dist_func_(n_vector, c_vector, dim_);
+          if (d > max_dist) {
+            max_dist = d;
+            furthest_idx = i;
+          }
+        }
+
+        // Remove the furthest connection
+        if (furthest_idx != -1) {
+          graph_[l_c][neighbor].erase(graph_[l_c][neighbor].begin() +
+                                      furthest_idx);
+        }
+      }
+
+      // Also shrink the newly inserted node's connections if needed
+      if (graph_[l_c][label].size() > (size_t)((l_c == 0) ? M0_ : M_)) {
+        const float *n_vector = storage_->get_vector(label);
+
+        float max_dist = -1.0;
+        int furthest_idx = -1;
+
+        for (size_t i = 0; i < graph_[l_c][label].size(); i++) {
+          int candidate = graph_[l_c][label][i];
+          const float *c_vector = storage_->get_vector(candidate);
+          float d = dist_func_(n_vector, c_vector, dim_);
+          if (d > max_dist) {
+            max_dist = d;
+            furthest_idx = i;
+          }
+        }
+
+        if (furthest_idx != -1) {
+          graph_[l_c][label].erase(graph_[l_c][label].begin() + furthest_idx);
+        }
       }
     }
 
@@ -133,18 +176,17 @@ HNSW::_select_neighbours(const float *query,
   std::vector<int> res;
   res.reserve(M);
 
-  // We want to return the closest ones. Priority queue is a max-heap (largest
-  // distance at top) To get the closest, we could pop everything into a vector
-  // and reverse it, or use a min-heap. For simplicity, we just pop into a
-  // vector and take the last M elements.
+  // candidates is a max-heap (largest distance at top)
+  // We want the smallest distance ones at the front of the result array.
+  // First, pop them all into a vector. They will be ordered largest to
+  // smallest.
   std::vector<dist_pair> sorted_candidates;
   while (!candidates.empty()) {
     sorted_candidates.push_back(candidates.top());
     candidates.pop();
   }
 
-  // They are sorted largest distance -> smallest distance
-  // We want the smallest distance ones (the end of the vector)
+  // Then iterate backwards from smallest to largest
   for (int i = sorted_candidates.size() - 1; i >= 0 && res.size() < (size_t)M;
        i--) {
     res.push_back(sorted_candidates[i].second);
@@ -165,6 +207,8 @@ std::priority_queue<dist_pair> HNSW::_search_layer(const float *query, int ep,
   visited_array_[ep] = visited_tag_;
 
   // C (candidate set) - min-heap to extract the closest node to query
+  // Priority queue by default is max-heap, so we need greater to make it
+  // min-heap
   auto cmp = [](const dist_pair &a, const dist_pair &b) {
     return a.first > b.first;
   };
@@ -174,7 +218,7 @@ std::priority_queue<dist_pair> HNSW::_search_layer(const float *query, int ep,
   std::priority_queue<dist_pair> W;
 
   // Calculate distance from query to entry point
-  const float *ep_vector = data_ptr_ + (size_t)ep * dim_;
+  const float *ep_vector = storage_->get_vector(ep);
   float dist_ep = dist_func_(query, ep_vector, dim_);
 
   C.push({dist_ep, ep});
@@ -197,7 +241,7 @@ std::priority_queue<dist_pair> HNSW::_search_layer(const float *query, int ep,
       if (visited_array_[neighbor] != visited_tag_) {
         visited_array_[neighbor] = visited_tag_;
 
-        const float *neighbor_vector = data_ptr_ + (size_t)neighbor * dim_;
+        const float *neighbor_vector = storage_->get_vector(neighbor);
         float dist_neighbor = dist_func_(query, neighbor_vector, dim_);
 
         furthest_W = W.top();
@@ -218,14 +262,83 @@ std::priority_queue<dist_pair> HNSW::_search_layer(const float *query, int ep,
 }
 
 std::vector<int> HNSW::search(const float *query, int k, int ef_search) {
-  // TODO: Implement search logic
-  (void)query;
-  (void)k;
-  (void)ef_search;
+  if (enterpoint_node_ == -1) {
+    return std::vector<int>(); // Empty graph
+  }
 
-  // Placeholder return
-  std::vector<int> res;
-  return res;
+  int ep = enterpoint_node_;
+  int L = max_level_;
+
+  // Phase 1: Descend through upper layers until layer 1
+  for (int l_c = L; l_c > 0; l_c--) {
+    std::priority_queue<dist_pair> W = _search_layer(query, ep, 1, l_c);
+    // W will only have the best node found at this layer because ef=1
+    ep = W.top().second;
+  }
+
+  // Phase 2: Search at bottom layer (0) with ef_search
+  std::priority_queue<dist_pair> W = _search_layer(query, ep, ef_search, 0);
+
+  // Return the nearest `k` candidates from W
+  return _select_neighbours(query, W, k, 0);
+}
+
+void HNSW::save_index(const std::string &filepath) const {
+  std::ofstream out(filepath, std::ios::binary);
+  if (!out.is_open()) {
+    throw std::runtime_error("Cannot open file for writing index: " + filepath);
+  }
+
+  out.write((char *)&enterpoint_node_, sizeof(int));
+  out.write((char *)&max_level_, sizeof(int));
+  out.write((char *)&num_elements_, sizeof(int));
+
+  out.write((char *)node_level_.data(), max_elements_ * sizeof(int));
+
+  int num_layers = max_level_ + 1;
+  out.write((char *)&num_layers, sizeof(int));
+
+  for (int l = 0; l < num_layers; l++) {
+    for (int i = 0; i < max_elements_; i++) {
+      int sz = graph_[l][i].size();
+      out.write((char *)&sz, sizeof(int));
+      if (sz > 0) {
+        out.write((char *)graph_[l][i].data(), sz * sizeof(int));
+      }
+    }
+  }
+}
+
+void HNSW::load_index(const std::string &filepath) {
+  std::ifstream in(filepath, std::ios::binary);
+  if (!in.is_open()) {
+    throw std::runtime_error("Cannot open file for reading index: " + filepath);
+  }
+
+  in.read((char *)&enterpoint_node_, sizeof(int));
+  in.read((char *)&max_level_, sizeof(int));
+  in.read((char *)&num_elements_, sizeof(int));
+
+  in.read((char *)node_level_.data(), max_elements_ * sizeof(int));
+
+  int num_layers;
+  in.read((char *)&num_layers, sizeof(int));
+
+  if (num_layers > (int)graph_.size()) {
+    graph_.resize(num_layers);
+  }
+
+  for (int l = 0; l < num_layers; l++) {
+    graph_[l].resize(max_elements_);
+    for (int i = 0; i < max_elements_; i++) {
+      int sz;
+      in.read((char *)&sz, sizeof(int));
+      graph_[l][i].resize(sz);
+      if (sz > 0) {
+        in.read((char *)graph_[l][i].data(), sz * sizeof(int));
+      }
+    }
+  }
 }
 
 } // namespace hnsw
