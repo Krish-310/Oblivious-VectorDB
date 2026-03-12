@@ -15,7 +15,7 @@ def download_file(url, filename):
     else:
         print(f"File {filename} already exists. Skipping download.")
 
-def convert_hdf5_to_binary(hdf5_path, out_dir):
+def convert_hdf5_to_binary(hdf5_path, out_dir, max_vectors=None):
     print(f"Opening {hdf5_path}...")
     f = h5py.File(hdf5_path, 'r')
     
@@ -24,6 +24,9 @@ def convert_hdf5_to_binary(hdf5_path, out_dir):
     # Dump train (base vectors)
     print("Dumping base vectors...")
     train = np.array(f['train'])
+    if max_vectors is not None and max_vectors < train.shape[0]:
+        print(f"  -> Capping base vectors from {train.shape[0]} to {max_vectors} for ORAM memory budget.")
+        train = train[:max_vectors]
     print(f"Shape: {train.shape}, Type: {train.dtype}")
     with open(os.path.join(out_dir, "base.bin"), "wb") as out_f:
         # Write dimensions as 32-bit integers at the start to make C++ reading easier
@@ -39,9 +42,13 @@ def convert_hdf5_to_binary(hdf5_path, out_dir):
         out_f.write(test.astype(np.float32).tobytes())
 
     # Dump neighbors (ground truth)
+    # Note: ground truth IDs reference the FULL original dataset.
+    # After capping, only ground truth IDs < max_vectors are valid hits.
     print("Dumping ground truth neighbors...")
     neighbors = np.array(f['neighbors'])
     print(f"Shape: {neighbors.shape}, Type: {neighbors.dtype}")
+    if max_vectors is not None:
+        print(f"  -> Note: recall may be slightly lower since ground truth references the full {f['train'].shape[0]}-vector set.")
     with open(os.path.join(out_dir, "ground_truth.bin"), "wb") as out_f:
         out_f.write(np.array([neighbors.shape[0], neighbors.shape[1]], dtype=np.int32).tobytes())
         out_f.write(neighbors.astype(np.int32).tobytes())
@@ -52,6 +59,8 @@ def convert_hdf5_to_binary(hdf5_path, out_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="sift-128-euclidean", help="Dataset name e.g., sift-128-euclidean")
+    parser.add_argument("--max-vectors", type=int, default=None,
+                        help="Cap the number of base vectors (useful for ORAM memory budget). E.g. --max-vectors 100000")
     args = parser.parse_args()
     
     dataset = args.dataset
@@ -61,7 +70,7 @@ def main():
     
     hdf5_file = os.path.join(data_dir, f"{dataset}.hdf5")
     download_file(url, hdf5_file)
-    convert_hdf5_to_binary(hdf5_file, os.path.join(data_dir, dataset))
+    convert_hdf5_to_binary(hdf5_file, os.path.join(data_dir, dataset), max_vectors=args.max_vectors)
 
 if __name__ == "__main__":
     main()

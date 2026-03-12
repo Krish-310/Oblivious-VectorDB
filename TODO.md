@@ -1,13 +1,13 @@
 # Oblivious VectorDB Roadmap
 
 ## Phase 1: Baseline HNSW
-- [ ] **Basic HNSW Insert**
+- [x] **Basic HNSW Insert**
   - Implement heuristic neighbor selection (`select_neighbors_heuristic`).
   - Implement node insertion logic across levels.
   - Implement standard HNSW Search to verify baseline accuracy (Recall@K).
 
 ## Phase 2: VectorDB Foundation
-- [ ] **Data Storage Architecture**
+- [x] **Data Storage Architecture**
   - Refactor `HNSW` class to interact via a `StorageAdapter` interface rather than direct array pointers.
   - Implement basic `MemoryStorage` (RAM-based) first.
   - (Optional) Implement `DiskStorage` (mmap-based) for handling datasets larger than RAM.
@@ -24,6 +24,6 @@
 - [ ] **Oblivious Search Algorithm**
   - Translate the standard HNSW search into the Oblivious HNSW search pseudocode.
   - Eliminate early-exit data dependencies and branch side-channels.
-- [ ] **Protect Vector Data Access**
+- [x] **Protect Vector Data Access**
   - Integrate H2O2RAM (Hardware-Assisted Oblivious RAM) to securely access the raw float vectors from the VectorDB storage layer during distance calculations.
   - Ensure distance computations (`distance.h`) do not leak memory access patterns.
