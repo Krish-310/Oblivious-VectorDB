@@ -23,13 +23,23 @@ python3 scripts/download_and_convert.py --dataset sift-128-euclidean
 deactivate
 ```
 
-## Building
+## Building (Native)
 
-A `Makefile` is provided. Run `make` to compile the project.
+A `Makefile` is provided. Run `make` to compile the project if you are on an x86 Linux machine.
 
 ```bash
 make
 ```
+
+## Running (Docker)
+
+If you are on an Apple Silicon device, H2O2RAM's x86 intrinsics will fail to compile. We provide an automated Docker script that builds an `amd64` Ubuntu container and drops you into a bash shell to compile and test the Vector DB oblivious storage cleanly:
+
+```bash
+./run_docker.sh
+```
+
+Inside the shell, run `make && ./hnsw_eval`
 
 ## Running
 

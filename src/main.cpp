@@ -1,6 +1,7 @@
 #include "index/hnsw.h"
 #include "storage/disk_storage.h"
 #include "storage/memory_storage.h"
+#include "storage/oram_storage.h"
 #include "utils/utils.h"
 #include <iostream>
 #include <string>
@@ -79,16 +80,27 @@ void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
 
   hnsw::StopW timer;
   int correct = 0;
-  int total = ds.query_n * k;
+  int total = 0; // Only count ground truth IDs actually in the indexed subset
 
   for (int i = 0; i < ds.query_n; ++i) {
     std::vector<int> results =
         index.search(ds.query.data() + i * ds.base_dim, k, ef_search);
 
-    // Simple recall calculation
+    // Build set of achievable ground truth IDs (those actually indexed)
+    std::vector<int> valid_truth;
+    for (int truth_idx = 0;
+         truth_idx < ds.gt_dim && (int)valid_truth.size() < k; ++truth_idx) {
+      int gt_id = ds.ground_truth[i * ds.gt_dim + truth_idx];
+      if (gt_id >= 0 && (size_t)gt_id < ds.base_n) {
+        valid_truth.push_back(gt_id);
+      }
+    }
+    total += (int)valid_truth.size();
+
+    // Count how many results match an achievable ground truth ID
     for (int r : results) {
-      for (int truth_idx = 0; truth_idx < k; ++truth_idx) {
-        if (r == ds.ground_truth[i * ds.gt_dim + truth_idx]) {
+      for (int gt_id : valid_truth) {
+        if (r == gt_id) {
           correct++;
           break;
         }
@@ -105,6 +117,10 @@ void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
   std::cout << "\n========================================\n";
   std::cout << "[FINAL METRICS]\n";
   std::cout << "========================================\n";
+  std::cout << "  -> Achievable ground truth hits: " << total << " / "
+            << (ds.query_n * k)
+            << " (subset ratio: " << (100.0f * total / (ds.query_n * k))
+            << "%)\n";
   std::cout << "  -> Accuracy (Recall@" << k
             << "): " << ((float)correct / total) * 100.0f << " %\n\n";
 }
@@ -113,11 +129,14 @@ int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0); // Disable stdout buffering
   std::string data_path = "./data/sift-128-euclidean";
   bool rebuild_index = false;
+  std::string storage_mode = "oram"; // "oram" | "disk"
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--rebuild-index") {
       rebuild_index = true;
+    } else if (arg == "--storage" && i + 1 < argc) {
+      storage_mode = argv[++i];
     } else {
       data_path = arg;
     }
@@ -161,22 +180,27 @@ int main(int argc, char **argv) {
   }
 
   if (!index_loaded) {
-    // Initialize Memory Storage just for building to make it as fast as
-    // possible
     hnsw::storage::MemoryStorage mem_storage(ds.base.data(), ds.base_dim);
     index.set_storage(&mem_storage);
     build_index(index, ds, index_path);
   }
 
-  // Initialize Disk Storage for searching to verify disk I/O implementation
-  // works
-  hnsw::storage::DiskStorage disk_storage(data_path + "/base.bin", ds.base_dim,
-                                          10000); // 10k itemsLRU cache
-  index.set_storage(&disk_storage);
+  std::cout << "Storage Mode: " << storage_mode << "\n\n";
 
   int k = 10;
   int ef_search = 50;
-  evaluate_search(index, ds, k, ef_search);
+
+  if (storage_mode == "disk") {
+    hnsw::storage::DiskStorage disk_storage(data_path + "/base.bin",
+                                            ds.base_dim, 10000);
+    index.set_storage(&disk_storage);
+    evaluate_search(index, ds, k, ef_search);
+  } else {
+    hnsw::storage::OramStorage oram_storage(ds.base.data(), ds.base_n,
+                                            ds.base_dim);
+    index.set_storage(&oram_storage);
+    evaluate_search(index, ds, k, ef_search);
+  }
 
   return 0;
 }

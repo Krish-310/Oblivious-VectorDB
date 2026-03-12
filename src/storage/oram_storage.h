@@ -82,7 +82,7 @@ public:
   // @param dim          Dimensionality of each vector (must be <= ORAM_MAX_DIM)
   // -------------------------------------------------------------------------
   OramStorage(const float *raw_vectors, size_t n, size_t dim)
-      : dim_(dim), n_(n), omap_(n) // initialise O2Map with capacity n
+      : dim_(dim), n_(n) // ORAM::ObliviousMap default-constructs fine
   {
     if (dim == 0)
       throw std::invalid_argument("OramStorage: dim must be > 0");
@@ -112,7 +112,10 @@ public:
   // Oblivious read: the O2Map touches the same number of hash-table buckets
   // regardless of which id is requested, hiding which vector is being fetched.
   //
-  // Returns a pointer valid until the next call to get_vector().
+  // Uses a round-robin pool of 64 return buffers to handle HNSW's pruning
+  // heuristic which holds up to M_max0 (typically 32) live pointers at once.
+  // Without this, a single-buffer implementation would alias and silently cause
+  // every pruning distance to evaluate to 0.
   // -------------------------------------------------------------------------
   const float *get_vector(size_t id) override {
     if (id >= n_)
@@ -120,15 +123,12 @@ public:
                               std::to_string(id) + " out of range [0, " +
                               std::to_string(n_) + ")");
 
+    // Advance to next buffer slot — ensures previous caller's pointer is
+    // still valid even if this is a nested call from the pruning heuristic.
     current_buf_idx_ = (current_buf_idx_ + 1) % NUM_BUFFERS;
-    OramVectorBlock &buf = ret_bufs_[current_buf_idx_];
-
-    bool found = omap_.find(static_cast<uint32_t>(id), &buf);
-    if (!found)
-      throw std::runtime_error("OramStorage::get_vector: id " +
-                               std::to_string(id) + " not found in O2Map");
-
-    return buf.data;
+    // Copy-assign from ORAM reference into our owned buffer slot.
+    ret_bufs_[current_buf_idx_] = omap_[static_cast<uint32_t>(id)];
+    return ret_bufs_[current_buf_idx_].data;
   }
 
   // -------------------------------------------------------------------------
@@ -156,14 +156,15 @@ private:
   size_t dim_;
   size_t n_;
 
-  // The O2Map: key = uint32_t node ID, value = OramVectorBlock
-  // H2O2RAM's stashless cuckoo hashing gives O(1) lookup (3-6 probes)
-  // regardless of n_, and oblivious rebuild amortized over inserts.
-  O2Map<uint32_t, OramVectorBlock> omap_;
+  // The ObliviousMap: key = uint32_t node ID, value = OramVectorBlock
+  // H2O2RAM's ORAM-backed map hides which vector is being accessed.
+  ORAM::ObliviousMap<uint32_t, OramVectorBlock> omap_;
 
-  // Array of buffers to support simultaneous fetched vector pointers.
-  // HNSW's distance calculations (e.g., pruning heuristics) can hold
-  // multiple pointers live at the same time (up to M_max0).
+  // Round-robin pool of 64 return buffers.
+  // HNSW's SELECT-NEIGHBORS heuristic holds up to M_max0 (~32) live
+  // get_vector() pointers simultaneously (one per already-selected neighbor).
+  // 64 slots gives a safe 2× margin over that maximum.
+  // Memory cost: 64 × 512 floats × 4 bytes = 128 KB (negligible).
   static constexpr int NUM_BUFFERS = 64;
   OramVectorBlock ret_bufs_[NUM_BUFFERS];
   uint8_t current_buf_idx_ = 0;
@@ -192,8 +193,8 @@ private:
 //   SRCS += $(ORAM_SRC)
 //
 // And clone the submodule:
-//   git submodule add https://github.com/55199789/H2O2RAM.git 
-//   third_party/H2O2RAM 
-//   git submodule update --init --recursive 
+//   git submodule add https://github.com/55199789/H2O2RAM.git
+//   third_party/H2O2RAM
+//   git submodule update --init --recursive
 //   cd third_party/H2O2RAM && bash ./setup.sh
 // =============================================================================
