@@ -1,6 +1,7 @@
 #include "index/hnsw.h"
 #include "storage/disk_storage.h"
 #include "storage/memory_storage.h"
+#include "storage/network_oram_storage.h"
 #include "storage/oram_storage.h"
 #include "utils/utils.h"
 #include <iostream>
@@ -129,7 +130,9 @@ int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0); // Disable stdout buffering
   std::string data_path = "./data/sift-128-euclidean";
   bool rebuild_index = false;
-  std::string storage_mode = "oram"; // "oram" | "disk"
+  std::string storage_mode = "oram"; // "disk" | "oram" | "network-oram"
+  std::string server_host = "127.0.0.1";
+  uint16_t server_port = 7777;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -137,6 +140,17 @@ int main(int argc, char **argv) {
       rebuild_index = true;
     } else if (arg == "--storage" && i + 1 < argc) {
       storage_mode = argv[++i];
+    } else if (arg == "--server" && i + 1 < argc) {
+      // Accept host:port  e.g. 127.0.0.1:7777
+      std::string addr = argv[++i];
+      auto colon = addr.rfind(':');
+      if (colon != std::string::npos) {
+        server_host = addr.substr(0, colon);
+        server_port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
+      } else {
+        server_host = addr;
+      }
+      storage_mode = "network-oram"; // --server implies network-oram
     } else {
       data_path = arg;
     }
@@ -195,7 +209,15 @@ int main(int argc, char **argv) {
                                             ds.base_dim, 10000);
     index.set_storage(&disk_storage);
     evaluate_search(index, ds, k, ef_search);
+  } else if (storage_mode == "network-oram") {
+    std::cout << "Connecting to block server at " << server_host << ":"
+              << server_port << "\n";
+    hnsw::storage::NetworkOramStorage net_storage(
+        server_host, server_port, ds.base.data(), ds.base_n, ds.base_dim);
+    index.set_storage(&net_storage);
+    evaluate_search(index, ds, k, ef_search);
   } else {
+    // Default: local H2O2RAM ObliviousMap (in-process, no server needed)
     hnsw::storage::OramStorage oram_storage(ds.base.data(), ds.base_n,
                                             ds.base_dim);
     index.set_storage(&oram_storage);
