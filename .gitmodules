@@ -1,4 +1,4 @@
-[submodule "third_party/H2O2RAM"]
-	path = third_party/H2O2RAM
+[submodule "include/H2O2RAM"]
+	path = include/H2O2RAM
 	url = https://github.com/55199789/H2O2RAM.git
 	ignore = dirty

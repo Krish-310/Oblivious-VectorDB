@@ -17,14 +17,14 @@
 //   auto storage = std::make_unique<OramStorage>(vectors, n, dim);
 //
 // Build requirements:
-//   - H2O2RAM cloned to third_party/H2O2RAM/
+//   - H2O2RAM cloned to include/H2O2RAM/
 //   - Add to Makefile (see bottom of this file)
 // =============================================================================
 
 #include "storage_adapter.h"
 
-// H2O2RAM headers — adjust path if your third_party dir is elsewhere
-#include "../../third_party/H2O2RAM/include/omap.hpp"
+// H2O2RAM headers — adjust path if your include dir is elsewhere
+#include "../../include/H2O2RAM/include/omap.hpp"
 
 #include <cstring>
 #include <stdexcept>
@@ -180,7 +180,7 @@ private:
 //
 // Add these lines to your existing Makefile:
 //
-//   ORAM_DIR     := third_party/H2O2RAM
+//   ORAM_DIR     :=  include/H2O2RAM
 //   ORAM_INCLUDE := -I$(ORAM_DIR)/include
 //   ORAM_SRC     := $(ORAM_DIR)/src/omap.cpp \
 //                   $(ORAM_DIR)/src/oram.cpp \
@@ -194,7 +194,7 @@ private:
 //
 // And clone the submodule:
 //   git submodule add https://github.com/55199789/H2O2RAM.git
-//   third_party/H2O2RAM
+//   include/H2O2RAM
 //   git submodule update --init --recursive
-//   cd third_party/H2O2RAM && bash ./setup.sh
+//   cd include/H2O2RAM && bash ./setup.sh
 // =============================================================================
