@@ -1,29 +1,12 @@
 #ifndef ORAM_STORAGE_H
 #define ORAM_STORAGE_H
 
-// =============================================================================
-// oram_storage.h
-//
-// An H2O2RAM-backed implementation of StorageAdapter.
-// Stores vectors obliviously — access patterns for get_vector(id) are hidden
-// from any observer watching memory bus or storage traffic.
-//
-// Drop-in replacement for MemoryStorage or DiskStorage:
-//
-//   // Before:
-//   auto storage = std::make_unique<MemoryStorage>(vectors, n, dim);
-//
-//   // After:
-//   auto storage = std::make_unique<OramStorage>(vectors, n, dim);
-//
-// Build requirements:
-//   - H2O2RAM cloned to include/H2O2RAM/
-//   - Add to Makefile (see bottom of this file)
-// =============================================================================
+// H2O2RAM
+// Creates an ORAM-backed map that stores vectors obliviously.
+// Requires storing data in RAM
 
 #include "storage_adapter.h"
 
-// H2O2RAM headers — adjust path if your include dir is elsewhere
 #include "../../include/H2O2RAM/include/omap.hpp"
 
 #include <cstring>
@@ -34,25 +17,12 @@
 namespace hnsw {
 namespace storage {
 
-// -----------------------------------------------------------------------------
-// OramVectorBlock
-//
-// The fixed-size value type stored in the O2Map.
-// O2Map requires a compile-time fixed size — all blocks must be identical
-// in size so the ORAM layer cannot distinguish them from each other.
-//
-// We support up to MAX_DIM floats. For smaller dims the tail is unused padding.
-// If your dim exceeds MAX_DIM, increase it and recompile.
-// -----------------------------------------------------------------------------
-static constexpr size_t ORAM_MAX_DIM = 512; // covers SIFT-128 and up to 512-dim
+// Allow 512 dimension vectors, for lower dims the remaining space is padded with zeros
+static constexpr size_t ORAM_MAX_DIM = 512;
 
 struct OramVectorBlock {
-  float data[ORAM_MAX_DIM]; // vector payload — tail is zero-padded if dim <
-                            // MAX_DIM
+  float data[ORAM_MAX_DIM]; // vector payload — tail is zero-padded if dim < MAX_DIM
 };
-
-static_assert(sizeof(OramVectorBlock) == ORAM_MAX_DIM * sizeof(float),
-              "OramVectorBlock layout unexpected");
 
 // -----------------------------------------------------------------------------
 // OramStorage
@@ -73,16 +43,9 @@ static_assert(sizeof(OramVectorBlock) == ORAM_MAX_DIM * sizeof(float),
 // -----------------------------------------------------------------------------
 class OramStorage : public StorageAdapter {
 public:
-  // -------------------------------------------------------------------------
-  // Constructor — bulk-loads all vectors into the O2Map at construction time.
-  //
-  // @param raw_vectors  Pointer to flat array: [v0_f0, v0_f1, ..., vN_fdim]
-  //                     Same layout as your base.bin after loading.
-  // @param n            Number of vectors
-  // @param dim          Dimensionality of each vector (must be <= ORAM_MAX_DIM)
-  // -------------------------------------------------------------------------
+  // Load all vectors into the O2Map at construction time.
   OramStorage(const float *raw_vectors, size_t n, size_t dim)
-      : dim_(dim), n_(n) // ORAM::ObliviousMap default-constructs fine
+      : dim_(dim), n_(n)
   {
     if (dim == 0)
       throw std::invalid_argument("OramStorage: dim must be > 0");
@@ -94,8 +57,6 @@ public:
     if (raw_vectors == nullptr && n > 0)
       throw std::invalid_argument("OramStorage: null raw_vectors");
 
-    // Bulk-insert every vector into the O2Map.
-    // This triggers the initial hierarchical level build inside H2O2RAM.
     OramVectorBlock block;
     std::memset(&block, 0, sizeof(block)); // zero-pad unused tail
 
@@ -123,26 +84,16 @@ public:
                               std::to_string(id) + " out of range [0, " +
                               std::to_string(n_) + ")");
 
-    // Advance to next buffer slot — ensures previous caller's pointer is
-    // still valid even if this is a nested call from the pruning heuristic.
+    // Use a buffer slot to return
     current_buf_idx_ = (current_buf_idx_ + 1) % NUM_BUFFERS;
     // Copy-assign from ORAM reference into our owned buffer slot.
     ret_bufs_[current_buf_idx_] = omap_[static_cast<uint32_t>(id)];
     return ret_bufs_[current_buf_idx_].data;
   }
 
-  // -------------------------------------------------------------------------
-  // get_dim() — returns dimension stored in trusted memory (not secret)
-  // -------------------------------------------------------------------------
   size_t get_dim() const override { return dim_; }
 
-  // -------------------------------------------------------------------------
-  // put_vector(id, vec)
-  //
-  // Oblivious write — used if you ever need to update a vector in-place
-  // (e.g. during an online update pass). Not required by StorageAdapter
-  // but useful to have.
-  // -------------------------------------------------------------------------
+  // Oblivious Write - Good to have
   void put_vector(size_t id, const float *vec) {
     OramVectorBlock block;
     std::memset(&block, 0, sizeof(block));
@@ -174,27 +125,3 @@ private:
 } // namespace hnsw
 
 #endif // ORAM_STORAGE_H
-
-// =============================================================================
-// MAKEFILE ADDITIONS
-//
-// Add these lines to your existing Makefile:
-//
-//   ORAM_DIR     :=  include/H2O2RAM
-//   ORAM_INCLUDE := -I$(ORAM_DIR)/include
-//   ORAM_SRC     := $(ORAM_DIR)/src/omap.cpp \
-//                   $(ORAM_DIR)/src/oram.cpp \
-//                   $(ORAM_DIR)/src/hash_table.cpp
-//
-//   # Add to your CXXFLAGS:
-//   CXXFLAGS += $(ORAM_INCLUDE) -std=c++17
-//
-//   # Add ORAM_SRC to your list of compiled objects, e.g.:
-//   SRCS += $(ORAM_SRC)
-//
-// And clone the submodule:
-//   git submodule add https://github.com/55199789/H2O2RAM.git
-//   include/H2O2RAM
-//   git submodule update --init --recursive
-//   cd include/H2O2RAM && bash ./setup.sh
-// =============================================================================

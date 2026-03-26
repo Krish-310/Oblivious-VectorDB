@@ -1,4 +1,5 @@
 #include "index/hnsw.h"
+#include "oblivious_index/hnsw.h"
 #include "storage/disk_storage.h"
 #include "storage/memory_storage.h"
 #include "storage/oram_storage.h"
@@ -43,7 +44,8 @@ bool load_datasets(const std::string &data_path, Dataset &ds) {
   return true;
 }
 
-void build_index(hnsw::HNSW &index, const Dataset &ds,
+template <typename IndexType>
+void build_index(IndexType &index, const Dataset &ds,
                  const std::string &index_path) {
   std::cout << "========================================\n";
   std::cout << "[PHASE 1] Index Construction\n";
@@ -69,20 +71,24 @@ void build_index(hnsw::HNSW &index, const Dataset &ds,
   std::cout << "  -> Index saved successfully.\n\n";
 }
 
-void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
-                     int ef_search) {
+template <typename IndexType>
+void evaluate_search(IndexType &index, const Dataset &ds, int k,
+                     int ef_search, int query_limit = -1) {
   std::cout << "========================================\n";
   std::cout << "[PHASE 2] Search Evaluation\n";
   std::cout << "========================================\n";
   std::cout << "Parameters:\n";
   std::cout << "  -> k (nearest neigbors): " << k << "\n";
-  std::cout << "  -> ef_search:            " << ef_search << "\n\n";
+  std::cout << "  -> ef_search:            " << ef_search << "\n";
+  
+  int queries_to_run = (query_limit > 0 && query_limit < ds.query_n) ? query_limit : ds.query_n;
+  std::cout << "  -> Queries evaluated:    " << queries_to_run << " / " << ds.query_n << "\n\n";
 
   hnsw::StopW timer;
   int correct = 0;
   int total = 0; // Only count ground truth IDs actually in the indexed subset
 
-  for (int i = 0; i < ds.query_n; ++i) {
+  for (int i = 0; i < queries_to_run; ++i) {
     std::vector<int> results =
         index.search(ds.query.data() + i * ds.base_dim, k, ef_search);
 
@@ -111,46 +117,28 @@ void evaluate_search(hnsw::HNSW &index, const Dataset &ds, int k,
 
   std::cout << "[RESULT] Search completed.\n";
   std::cout << "  -> Total Search Time: " << search_time << " seconds\n";
-  std::cout << "  -> Queries Per Second: " << (ds.query_n / search_time)
+  std::cout << "  -> Queries Per Second: " << (queries_to_run / search_time)
             << " QPS\n";
 
   std::cout << "\n========================================\n";
   std::cout << "[FINAL METRICS]\n";
   std::cout << "========================================\n";
-  std::cout << "  -> Achievable ground truth hits: " << total << " / "
-            << (ds.query_n * k)
-            << " (subset ratio: " << (100.0f * total / (ds.query_n * k))
-            << "%)\n";
-  std::cout << "  -> Accuracy (Recall@" << k
-            << "): " << ((float)correct / total) * 100.0f << " %\n\n";
+  if (total > 0) {
+    std::cout << "  -> Achievable ground truth hits: " << total << " / "
+              << (queries_to_run * k)
+              << " (subset ratio: " << (100.0f * total / (queries_to_run * k))
+              << "%)\n";
+    std::cout << "  -> Accuracy (Recall@" << k
+              << "): " << ((float)correct / total) * 100.0f << " %\n\n";
+  } else {
+    std::cout << "  -> Accuracy could not be computed (No achievable ground truth paths found).\n\n";
+  }
 }
 
-int main(int argc, char **argv) {
-  setvbuf(stdout, NULL, _IONBF, 0); // Disable stdout buffering
-  std::string data_path = "./data/sift-128-euclidean";
-  bool rebuild_index = false;
-  std::string storage_mode = "oram"; // "oram" | "disk"
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "--rebuild-index") {
-      rebuild_index = true;
-    } else if (arg == "--storage" && i + 1 < argc) {
-      storage_mode = argv[++i];
-    } else {
-      data_path = arg;
-    }
-  }
-
-  std::cout << "\n========================================\n";
-  std::cout << "          HNSW C++ EVALUATION           \n";
-  std::cout << "========================================\n\n";
-
-  Dataset ds;
-  if (!load_datasets(data_path, ds)) {
-    return 1;
-  }
-
+template <typename IndexType>
+void run_evaluation(const Dataset &ds, const std::string &data_path,
+                    const std::string &storage_mode, const std::string &index_type, 
+                    bool rebuild_index, int query_limit) {
   // HNSW Parameters
   int M = 16;
   int ef_construction = 200;
@@ -159,9 +147,9 @@ int main(int argc, char **argv) {
   std::cout << "  -> M (max edges):     " << M << "\n";
   std::cout << "  -> ef_construction:   " << ef_construction << "\n\n";
 
-  hnsw::HNSW index(ds.base_dim, ds.base_n, M, ef_construction);
+  IndexType index(ds.base_dim, ds.base_n, M, ef_construction);
 
-  std::string index_path = data_path + "/graph_edges.db";
+  std::string index_path = data_path + "/graph_edges_" + index_type + ".db";
   bool index_loaded = false;
 
   if (!rebuild_index) {
@@ -192,14 +180,55 @@ int main(int argc, char **argv) {
 
   if (storage_mode == "disk") {
     hnsw::storage::DiskStorage disk_storage(data_path + "/base.bin",
-                                            ds.base_dim, 10000);
+                                            ds.base_dim, ds.base_n);
     index.set_storage(&disk_storage);
-    evaluate_search(index, ds, k, ef_search);
+    evaluate_search(index, ds, k, ef_search, query_limit);
   } else {
     hnsw::storage::OramStorage oram_storage(ds.base.data(), ds.base_n,
                                             ds.base_dim);
     index.set_storage(&oram_storage);
-    evaluate_search(index, ds, k, ef_search);
+    evaluate_search(index, ds, k, ef_search, query_limit);
+  }
+}
+
+int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0); // Disable stdout buffering
+  std::string data_path = "./data/sift-128-euclidean";
+  bool rebuild_index = false;
+  std::string storage_mode = "oram"; // "oram" | "disk"
+  std::string index_type = "standard"; // "standard" | "oblivious"
+  int query_limit = -1;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--rebuild-index") {
+      rebuild_index = true;
+    } else if (arg == "--storage" && i + 1 < argc) {
+      storage_mode = argv[++i];
+    } else if (arg == "--num-queries" && i + 1 < argc) {
+      query_limit = std::stoi(argv[++i]);
+    } else if (arg == "--index-type" && i + 1 < argc) {
+      index_type = argv[++i];
+    } else {
+      data_path = arg;
+    }
+  }
+
+  std::cout << "\n========================================\n";
+  std::cout << "          HNSW C++ EVALUATION           \n";
+  std::cout << "========================================\n\n";
+
+  Dataset ds;
+  if (!load_datasets(data_path, ds)) {
+    return 1;
+  }
+  
+  std::cout << "  -> Index Type:   " << index_type << "\n\n";
+
+  if (index_type == "oblivious") {
+    run_evaluation<oblivious_hnsw::HNSW>(ds, data_path, storage_mode, index_type, rebuild_index, query_limit);
+  } else {
+    run_evaluation<hnsw::HNSW>(ds, data_path, storage_mode, index_type, rebuild_index, query_limit);
   }
 
   return 0;

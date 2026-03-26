@@ -17,7 +17,7 @@ source venv/bin/activate
 pip install numpy h5py
 
 # 4. Download and convert the dataset (e.g., sift-128-euclidean)
-python3 scripts/download_and_convert.py --dataset sift-128-euclidean
+python3 scripts/download_and_convert.py --dataset sift-128-euclidean --max-vectors 1000
 
 # 5. Deactivate the virtual environment
 deactivate
@@ -28,7 +28,7 @@ deactivate
 A `Makefile` is provided. Run `make` to compile the project if you are on an x86 Linux machine.
 
 ```bash
-make
+make -j
 ```
 
 ## Running (Docker)
@@ -39,7 +39,7 @@ If you are on an Apple Silicon device, H2O2RAM's x86 intrinsics will fail to com
 ./run_docker.sh
 ```
 
-Inside the shell, run `make && ./hnsw_eval`
+Inside the shell, run `make -j && ./hnsw_eval`
 
 ## Running
 

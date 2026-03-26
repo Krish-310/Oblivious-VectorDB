@@ -42,13 +42,32 @@ def convert_hdf5_to_binary(hdf5_path, out_dir, max_vectors=None):
         out_f.write(test.astype(np.float32).tobytes())
 
     # Dump neighbors (ground truth)
-    # Note: ground truth IDs reference the FULL original dataset.
-    # After capping, only ground truth IDs < max_vectors are valid hits.
     print("Dumping ground truth neighbors...")
     neighbors = np.array(f['neighbors'])
+    
+    if max_vectors is not None and max_vectors < f['train'].shape[0]:
+        print(f"  -> Recomputing exact ground truth neighbors for {max_vectors} base vectors...")
+        try:
+            dist_metric = f.attrs.get('distance', 'euclidean')
+            if isinstance(dist_metric, bytes):
+                dist_metric = dist_metric.decode('utf-8')
+        except:
+            dist_metric = 'euclidean'
+            
+        k = neighbors.shape[1]
+        
+        if dist_metric == 'angular':
+            train_norm = train / (np.linalg.norm(train, axis=1, keepdims=True) + 1e-10)
+            test_norm = test / (np.linalg.norm(test, axis=1, keepdims=True) + 1e-10)
+            dists = -np.dot(test_norm, train_norm.T)
+        else:
+            train_sq = np.sum(train**2, axis=1)
+            test_sq = np.sum(test**2, axis=1)
+            dists = test_sq[:, np.newaxis] + train_sq[np.newaxis, :] - 2 * np.dot(test, train.T)
+        
+        neighbors = np.argsort(dists, axis=1)[:, :k].astype(np.int32)
+        
     print(f"Shape: {neighbors.shape}, Type: {neighbors.dtype}")
-    if max_vectors is not None:
-        print(f"  -> Note: recall may be slightly lower since ground truth references the full {f['train'].shape[0]}-vector set.")
     with open(os.path.join(out_dir, "ground_truth.bin"), "wb") as out_f:
         out_f.write(np.array([neighbors.shape[0], neighbors.shape[1]], dtype=np.int32).tobytes())
         out_f.write(neighbors.astype(np.int32).tobytes())
