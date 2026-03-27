@@ -3,7 +3,12 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
+
+#include "../../include/H2O2RAM/include/omap.hpp"
+
+#include "../utils/oblivious_heap.h"
 
 namespace oblivious_hnsw {
 
@@ -24,13 +29,17 @@ HNSW::HNSW(size_t dim, int max_elements, int M, int ef_construction,
 
   // Create 20 empty layers as a safe maximum for random level generation
   graph_.resize(20);
-  for (auto &layer_adj : graph_) {
-    layer_adj.resize(max_elements_);
-  }
 
-  // Pre-allocate the visited array to avoid memory allocations during search
-  visited_array_.resize(max_elements_, 0);
+  // Initialize the visited tag logic
   visited_tag_ = 0;
+
+  // Pre-populate the visited ObliviousMap with all possible node IDs (plus
+  // DUMMY) so that operator[] can overwrite them in-place during search without
+  // triggering unbounded ORAM exponential bounds resizing!
+  for (int i = 0; i < max_elements_; i++) {
+    visited_.insert(i, 0);
+  }
+  visited_.insert(static_cast<uint32_t>(-1), 0);
 }
 
 HNSW::~HNSW() {
@@ -47,7 +56,7 @@ int HNSW::get_random_level() {
 
 void HNSW::insert(int label, const float *vector) {
 
-  std::priority_queue<dist_pair> W;
+  utils::ObliviousMaxHeap W;
   int ep = enterpoint_node_;
   int L = max_level_;
   int l = get_random_level();
@@ -56,18 +65,19 @@ void HNSW::insert(int label, const float *vector) {
   // level
   if (l >= (int)graph_.size()) {
     graph_.resize(l + 1);
-    for (auto &layer_adj : graph_) {
-      if (layer_adj.size() < (size_t)max_elements_) {
-        layer_adj.resize(max_elements_);
-      }
-    }
   }
 
   // Save the maximum level of this new node
   node_level_[label] = l;
 
-  // At this point, `graph_[layer][label]` is an empty std::vector<int> ready to
-  // hold neighbors.
+  // Explicitly initialize an empty node at all active layers for this label
+  // Since graph_ is now an ObliviousMap, we cannot rely on vector
+  // pre-allocation.
+  OramGraphNode empty_node;
+  empty_node.count = 0;
+  for (int layer = 0; layer <= l; layer++) {
+    graph_[layer].insert(label, empty_node);
+  }
 
   if (ep == -1) {
     enterpoint_node_ = label;
@@ -80,34 +90,77 @@ void HNSW::insert(int label, const float *vector) {
   float dist_ep = dist_func_(vector, ep, storage_, dim_);
 
   for (int l_c = L; l_c > l; l_c--) {
-    W = _search_layer(vector, ep, 1, l_c);
+    int T_bound = (l_c == 0) ? T0_build_ : T_build_;
+    W = _search_layer(vector, ep, 1, l_c, T_bound);
 
-    // Convert the max-heap W to find the nearest element
-    // Since ef=1, W only has 1 element, but W.top() is the LARGEST (furthest)
-    // For ef=1, it is both the furthest and nearest.
-    ep = W.top().second;
+    // Convert the max-heap W to find the nearest valid element securely
+    // Since ef=1, we can isolate it by popping dummy values out
+    int next_ep = ep;
+    float next_min_dist = std::numeric_limits<float>::infinity();
+    while (!W.empty()) {
+      dist_pair p = W.pop_max();
+      if (p.second != -1 && p.first < next_min_dist) {
+        next_min_dist = p.first;
+        next_ep = p.second;
+      }
+    }
+    ep = next_ep;
   }
 
   for (int l_c = std::min(L, l); l_c >= 0; l_c--) {
-    W = _search_layer(vector, ep, ef_construction_, l_c);
+    int T_bound = (l_c == 0) ? T0_build_ : T_build_;
+    W = _search_layer(vector, ep, ef_construction_, l_c, T_bound);
     std::vector<int> neighbours = _select_neighbours(vector, W, M_, l_c);
 
     // add bidirectional connections
     for (int neighbor : neighbours) {
-      graph_[l_c][label].push_back(neighbor);
-      graph_[l_c][neighbor].push_back(label);
+      OramGraphNode node_label = graph_[l_c][label];
+      if (node_label.count < ORAM_MAX_EDGES) {
+        node_label.edges[node_label.count++] = neighbor;
+        graph_[l_c][label] = node_label;
+      }
+
+      OramGraphNode node_neighbor = graph_[l_c][neighbor];
+      if (node_neighbor.count < ORAM_MAX_EDGES) {
+        node_neighbor.edges[node_neighbor.count++] = label;
+        graph_[l_c][neighbor] = node_neighbor;
+      }
 
       // shrink connections if needed using a simple furthest-node heuristic
-      if (graph_[l_c][neighbor].size() > (size_t)((l_c == 0) ? M0_ : M_)) {
-        int max_M = (l_c == 0) ? M0_ : M_;
+      if (node_neighbor.count > ((l_c == 0) ? M0_ : M_)) {
         const float *n_vector = storage_->get_vector(neighbor);
 
-        // Find the furthest connection to remove
         float max_dist = -1.0;
         int furthest_idx = -1;
 
-        for (size_t i = 0; i < graph_[l_c][neighbor].size(); i++) {
-          int candidate = graph_[l_c][neighbor][i];
+        for (int i = 0; i < node_neighbor.count; i++) {
+          int candidate = node_neighbor.edges[i];
+          float d = dist_func_(n_vector, candidate, storage_, dim_);
+          if (d > max_dist) {
+            max_dist = d;
+            furthest_idx = i;
+          }
+        }
+
+        // Remove the furthest connection sequentially
+        if (furthest_idx != -1) {
+          for (int i = furthest_idx; i < node_neighbor.count - 1; i++) {
+            node_neighbor.edges[i] = node_neighbor.edges[i + 1];
+          }
+          node_neighbor.count--;
+          graph_[l_c][neighbor] = node_neighbor;
+        }
+      }
+
+      // Also shrink the newly inserted node's connections if needed
+      if (node_label.count > ((l_c == 0) ? M0_ : M_)) {
+        const float *n_vector = storage_->get_vector(label);
+
+        float max_dist = -1.0;
+        int furthest_idx = -1;
+
+        for (int i = 0; i < node_label.count; i++) {
+          int candidate = node_label.edges[i];
           float d = dist_func_(n_vector, candidate, storage_, dim_);
           if (d > max_dist) {
             max_dist = d;
@@ -117,43 +170,24 @@ void HNSW::insert(int label, const float *vector) {
 
         // Remove the furthest connection
         if (furthest_idx != -1) {
-          graph_[l_c][neighbor].erase(graph_[l_c][neighbor].begin() +
-                                      furthest_idx);
-        }
-      }
-
-      // Also shrink the newly inserted node's connections if needed
-      if (graph_[l_c][label].size() > (size_t)((l_c == 0) ? M0_ : M_)) {
-        const float *n_vector = storage_->get_vector(label);
-
-        float max_dist = -1.0;
-        int furthest_idx = -1;
-
-        for (size_t i = 0; i < graph_[l_c][label].size(); i++) {
-          int candidate = graph_[l_c][label][i];
-          float d = dist_func_(n_vector, candidate, storage_, dim_);
-          if (d > max_dist) {
-            max_dist = d;
-            furthest_idx = i;
+          for (int i = furthest_idx; i < node_label.count - 1; i++) {
+            node_label.edges[i] = node_label.edges[i + 1];
           }
-        }
-
-        if (furthest_idx != -1) {
-          graph_[l_c][label].erase(graph_[l_c][label].begin() + furthest_idx);
+          node_label.count--;
+          graph_[l_c][label] = node_label;
         }
       }
     }
 
-    // Convert max-heap to find the nearest (smallest distance) element in W for
-    // the next layer down
+    // Check the remaining elements in W to find the minimal route for layer
+    // descent
     int nearest_node = ep;
-    float min_dist = INFINITY;
+    float min_dist = std::numeric_limits<float>::infinity();
     while (!W.empty()) {
-      if (W.top().first < min_dist) {
-        min_dist = W.top().first;
-        nearest_node = W.top().second;
-      }
-      W.pop();
+      dist_pair p = W.pop_max();
+      bool is_valid = (p.second != -1) && (p.first < min_dist);
+      min_dist = is_valid ? p.first : min_dist;
+      nearest_node = is_valid ? p.second : nearest_node;
     }
     ep = nearest_node;
   }
@@ -165,10 +199,9 @@ void HNSW::insert(int label, const float *vector) {
   num_elements_++;
 }
 
-std::vector<int>
-HNSW::_select_neighbours(const float *query,
-                         std::priority_queue<dist_pair> candidates, int M,
-                         int level) {
+std::vector<int> HNSW::_select_neighbours(const float *query,
+                                          utils::ObliviousMaxHeap candidates,
+                                          int M, int level) {
   // Simple heuristic: just take the closest M elements from the candidates
   std::vector<int> res;
   res.reserve(M);
@@ -179,8 +212,10 @@ HNSW::_select_neighbours(const float *query,
   // smallest.
   std::vector<dist_pair> sorted_candidates;
   while (!candidates.empty()) {
-    sorted_candidates.push_back(candidates.top());
-    candidates.pop();
+    dist_pair p = candidates.pop_max();
+    if (p.second != -1) { // Ignore DUMMY elements
+      sorted_candidates.push_back(p);
+    }
   }
 
   // Then iterate backwards from smallest to largest
@@ -192,68 +227,79 @@ HNSW::_select_neighbours(const float *query,
   return res;
 }
 
-std::priority_queue<dist_pair> HNSW::_search_layer(const float *query, int ep,
-                                                   int ef, int level) {
+utils::ObliviousMaxHeap HNSW::_search_layer(const float *query, int ep, int ef,
+                                            int level, int T) {
 
-  // v (visited nodes) using the zero-allocation tag method
   visited_tag_++;
-  if (visited_tag_ == 0) { // Prevent overflow theoretically (4 billion queries)
-    std::fill(visited_array_.begin(), visited_array_.end(), 0);
+  if (visited_tag_ == 0) {
     visited_tag_ = 1;
   }
-  visited_array_[ep] = visited_tag_;
 
-  // C (candidate set) - min-heap to extract the closest node to query
-  // Priority queue by default is max-heap, so we need greater to make it
-  // min-heap
-  auto cmp = [](const dist_pair &a, const dist_pair &b) {
-    return a.first > b.first;
-  };
-  std::priority_queue<dist_pair, std::vector<dist_pair>, decltype(cmp)> C(cmp);
+  utils::ObliviousMinHeap candidates;
+  utils::ObliviousMaxHeap found;
 
-  // W (found nearest neighbors) - max-heap to keep the ef closest nodes
-  std::priority_queue<dist_pair> W;
+  constexpr float inf = std::numeric_limits<float>::infinity();
+  constexpr int DUMMY = -1;
 
-  // Calculate distance from query to entry point
-  float dist_ep = dist_func_(query, ep, storage_, dim_);
+  dist_pair start_node = {dist_func_(query, ep, storage_, dim_), ep};
+  found.insert(start_node.first, start_node.second);
+  for (int i = 0; i < ef; i++) {
+    found.insert(inf, DUMMY);
+  }
 
-  C.push({dist_ep, ep});
-  W.push({dist_ep, ep});
+  candidates.insert(start_node.first, start_node.second);
+  visited_[ep] = visited_tag_;
 
-  while (!C.empty()) {
-    // Extract nearest element from C to query
-    dist_pair curr = C.top();
-    C.pop();
+  // T outer loop iterations passed natively from the caller context bounds
+  for (int i = 0; i < T; i++) {
 
-    // Get furthest element from W to query
-    dist_pair furthest_W = W.top();
+    dist_pair c = candidates.pop_min();
 
-    if (curr.first > furthest_W.first) {
-      break; // All elements in W are evaluated
-    }
+    int level_connections = (level > 0) ? M_ : M0_;
 
-    // For each e in curr's neighbors at layer `level`
-    for (int neighbor : graph_[level][curr.second]) {
-      if (visited_array_[neighbor] != visited_tag_) {
-        visited_array_[neighbor] = visited_tag_;
+    // PREVENT EXCEPTION:
+    // Route DUMMY to index 0 dynamically. Since `c.second` being DUMMY flips
+    // `is_dummy` to true, all resulting nodes parsed from Node 0 will be safely
+    // ignored natively downstream!
+    uint32_t safe_c = (c.second == DUMMY) ? 0 : c.second;
+    OramGraphNode c_neighbours = graph_[level][safe_c];
 
-        float dist_neighbor = dist_func_(query, neighbor, storage_, dim_);
+    for (int i = 0; i < level_connections; i++) {
 
-        furthest_W = W.top();
+      int e = c_neighbours.edges[i];
 
-        if (dist_neighbor < furthest_W.first || W.size() < (size_t)ef) {
-          C.push({dist_neighbor, neighbor});
-          W.push({dist_neighbor, neighbor});
+      // PREVENT EXCEPTION: Mask out DUMMY to 0 for the memory fetch
+      int safe_e = (e == DUMMY) ? 0 : e;
+      float e_dist = dist_func_(query, safe_e, storage_, dim_);
 
-          if (W.size() > (size_t)ef) {
-            W.pop();
-          }
-        }
-      }
+      bool seen = (visited_[safe_e] == visited_tag_);
+      bool is_dummy = (e == DUMMY) || (c.second == DUMMY);
+
+      bool add_to_visited = (!seen && !is_dummy);
+
+      // oblivious update of visited set in-place
+      uint32_t target_e = add_to_visited ? e : DUMMY;
+      unsigned int target_tag = add_to_visited ? visited_tag_ : 0;
+      visited_[target_e] = target_tag;
+
+      // Use the actual distance from the found heap to preserve infinity
+      // bounds!
+      float f2_dist = found.get_max().first;
+
+      bool better = (e_dist < f2_dist);
+
+      bool do_insert = (add_to_visited && better);
+
+      float target_dist = do_insert ? e_dist : inf;
+      int target_node = do_insert ? e : DUMMY;
+      found.insert(target_dist, target_node);
+      found.pop_max();
+
+      candidates.insert(target_dist, target_node);
     }
   }
 
-  return W;
+  return found;
 }
 
 std::vector<int> HNSW::search(const float *query, int k, int ef_search) {
@@ -266,19 +312,31 @@ std::vector<int> HNSW::search(const float *query, int k, int ef_search) {
 
   // Phase 1: Descend through upper layers until layer 1
   for (int l_c = L; l_c > 0; l_c--) {
-    std::priority_queue<dist_pair> W = _search_layer(query, ep, 1, l_c);
-    // W will only have the best node found at this layer because ef=1
-    ep = W.top().second;
+    int T_bound = (l_c == 0) ? T0_ : T_;
+    utils::ObliviousMaxHeap W = _search_layer(query, ep, 1, l_c, T_);
+
+    // Find the valid node locally filtering against dummies
+    int next_ep = ep;
+    float min_d = std::numeric_limits<float>::infinity();
+    while (!W.empty()) {
+      dist_pair p = W.pop_max();
+
+      bool is_valid = (p.second != -1) && (p.first < min_d);
+
+      min_d = is_valid ? p.first : min_d;
+      next_ep = is_valid ? p.second : next_ep;
+    }
+    ep = next_ep;
   }
 
   // Phase 2: Search at bottom layer (0) with ef_search
-  std::priority_queue<dist_pair> W = _search_layer(query, ep, ef_search, 0);
+  utils::ObliviousMaxHeap W = _search_layer(query, ep, ef_search, 0, T0_);
 
   // Return the nearest `k` candidates from W
   return _select_neighbours(query, W, k, 0);
 }
 
-void HNSW::save_index(const std::string &filepath) const {
+void HNSW::save_index(const std::string &filepath) {
   std::ofstream out(filepath, std::ios::binary);
   if (!out.is_open()) {
     throw std::runtime_error("Cannot open file for writing index: " + filepath);
@@ -295,10 +353,11 @@ void HNSW::save_index(const std::string &filepath) const {
 
   for (int l = 0; l < num_layers; l++) {
     for (int i = 0; i < max_elements_; i++) {
-      int sz = graph_[l][i].size();
+      OramGraphNode node = graph_[l][i];
+      int sz = node.count;
       out.write((char *)&sz, sizeof(int));
       if (sz > 0) {
-        out.write((char *)graph_[l][i].data(), sz * sizeof(int));
+        out.write((char *)node.edges, sz * sizeof(int));
       }
     }
   }
@@ -324,13 +383,14 @@ void HNSW::load_index(const std::string &filepath) {
   }
 
   for (int l = 0; l < num_layers; l++) {
-    graph_[l].resize(max_elements_);
     for (int i = 0; i < max_elements_; i++) {
       int sz;
       in.read((char *)&sz, sizeof(int));
-      graph_[l][i].resize(sz);
       if (sz > 0) {
-        in.read((char *)graph_[l][i].data(), sz * sizeof(int));
+        OramGraphNode node;
+        node.count = sz;
+        in.read((char *)node.edges, sz * sizeof(int));
+        graph_[l].insert(i, node);
       }
     }
   }

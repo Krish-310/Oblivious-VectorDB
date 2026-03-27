@@ -176,7 +176,7 @@ void run_evaluation(const Dataset &ds, const std::string &data_path,
   std::cout << "Storage Mode: " << storage_mode << "\n\n";
 
   int k = 10;
-  int ef_search = 50;
+  int ef_search = 100;
 
   if (storage_mode == "disk") {
     hnsw::storage::DiskStorage disk_storage(data_path + "/base.bin",

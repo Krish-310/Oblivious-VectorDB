@@ -10,7 +10,7 @@ ORAM_SRC     := $(ORAM_DIR)/src/depthCounter.cpp \
 
 CXXFLAGS += $(ORAM_INCLUDE)
 
-SRCS = src/main.cpp src/index/hnsw.cpp src/oblivious_index/hnsw.cpp $(ORAM_SRC)
+SRCS = src/main.cpp src/index/hnsw.cpp src/oblivious_index/hnsw.cpp src/utils/oblivious_heap.cpp $(ORAM_SRC)
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(SRCS:.cpp=.d)
 TARGET = hnsw_eval

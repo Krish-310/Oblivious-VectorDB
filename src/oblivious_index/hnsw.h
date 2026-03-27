@@ -8,7 +8,23 @@
 #include <string>
 #include <vector>
 
+#include "../../include/H2O2RAM/include/omap.hpp"
+#include "../utils/oblivious_heap.h"
+
 namespace oblivious_hnsw {
+
+// Since ORAM blocks require a compile-time fixed layout, we pad the edges.
+// Adjust MAX_EDGES if you intend to run M0 > 64.
+static constexpr int ORAM_MAX_EDGES = 64;
+
+struct OramGraphNode {
+    int count;
+    int edges[ORAM_MAX_EDGES];
+
+    OramGraphNode() : count(0) {
+        std::fill_n(edges, ORAM_MAX_EDGES, -1);
+    }
+};
 
 // A simple max-heap element where 'first' is distance, 'second' is node id
 using dist_pair = std::pair<float, int>;
@@ -26,7 +42,7 @@ public:
   void insert(int label, const float *vector);
 
   // Serialize index to disk
-  void save_index(const std::string &filepath) const;
+  void save_index(const std::string &filepath);
 
   // Load index from disk
   void load_index(const std::string &filepath);
@@ -50,15 +66,23 @@ private:
   int enterpoint_node_;
   int num_elements_;
 
+  // Oblivious Traversal
+  int T_ = 20;
+  int T0_ = 40;
+
+  // Build constraints (Isolated to prevent search query dynamic scaling)
+  int T_build_ = 30;
+  int T0_build_ = 200;
+
   std::mt19937 level_generator_;
   std::uniform_real_distribution<double> uniform_dist_{0.0, 1.0};
 
   int get_random_level();
 
-  std::priority_queue<dist_pair> _search_layer(const float *query, int ep,
-                                               int ef, int level);
+  utils::ObliviousMaxHeap _search_layer(const float *query, int ep,
+                                               int ef, int level, int T);
   std::vector<int> _select_neighbours(const float *query,
-                                      std::priority_queue<dist_pair> candidates,
+                                      utils::ObliviousMaxHeap candidates,
                                       int M, int level);
 
   DistFunc dist_func_;
@@ -67,13 +91,14 @@ private:
 
   // graph_[L][N] gives the vector of neighbor IDs for node N on layer L.
   // We allocate this up to some maximum expected number of levels (e.g., 20).
-  std::vector<std::vector<std::vector<int>>> graph_;
+  // graph_[L] evaluates to an ObliviousMap linking NodeID -> OramGraphNode
+  std::vector<ORAM::ObliviousMap<uint32_t, OramGraphNode>> graph_;
 
   // We still need to know the max level each node exists on
   std::vector<int> node_level_;
 
-  // High performance visited array to prevent allocations during search
-  std::vector<unsigned int> visited_array_;
+  // High performance visited map to obliviously track query traversals
+  ORAM::ObliviousMap<uint32_t, unsigned int> visited_;
   unsigned int visited_tag_;
 
   // Pointer to the storage layer, which handles memory or disk vectors
