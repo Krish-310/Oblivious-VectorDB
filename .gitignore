@@ -3,6 +3,8 @@
 *.d
 *.out
 hnsw_eval
+*.bin*
+*.log
 
 # OS generated files
 .DS_Store
@@ -18,3 +20,5 @@ hnsw_eval
 # Downloaded data
 data/
 venv/
+
+
